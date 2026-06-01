@@ -1,3 +1,5 @@
+# FINAL DESCRIPTION NOT DONE!
+
 # link-zapper
 
 A lightweight CLI tool that **zaps** tracking parameters, unwraps redirect wrappers, and resolves shortened URLs from social media share links. Works with YouTube, X (Twitter), Instagram, Facebook, and any URL with common tracking tags.

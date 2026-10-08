@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-`link-zapper` (formerly `clean-link`) is a lightweight CLI utility that takes "share links" from social media platforms and produces clean, tracking-free versions. It unwraps redirect wrappers (YouTube `/redirect`), resolves shortened URLs (`t.co`), strips tracking parameters, and normalizes hosts.
+`link-zapper` is a lightweight CLI utility that takes share links from social media platforms and produces clean, tracking-free versions. It unwraps redirect wrappers, resolves shortened URLs, strips tracking parameters, and normalizes hosts.
 
 ## 2. Core Purpose
 
@@ -36,8 +36,8 @@ Input URL
   │     → watch?v=ID → youtu.be/ID
   │     → shorts/ID  → youtu.be/ID
   │     → embed/ID   → youtu.be/ID
-  │     → youtu.be/ID (pass through, preserve t=)
-  │     → Preserves timestamp (t=, start=)
+  │     → youtu.be/ID (pass through)
+  │     → Preserves timestamp (t=, start=) and playlist (list=, index=)
   │
   ├─ 4. General tracking removal (config-driven)
   │     → utm_source, fbclid, gclid, dclid, msclkid, etc.
@@ -62,7 +62,7 @@ Input URL
 | Shortener resolution | known shortener host, or a share path such as `/share/` | `resolve_redirect()` HTTP client |
 | YouTube video reconstruction | host in `is_youtube_host()` | `clean_youtube()` URL builder |
 
-### 3.3 Config-driven behavior (extensible)
+### 3.3 Config-driven behavior
 
 | Feature | Config mechanism |
 |---------|-----------------|
@@ -70,9 +70,7 @@ Input URL
 | Host normalization | `normalize_host` per-platform |
 | Platform domain matching | `domains` per-platform |
 
-## 4. Config design
-
-### 4.1 Current schema
+## 4. Configuration
 
 ```toml
 [general]
@@ -81,44 +79,14 @@ tracking_prefixes = ["utm_"]
 
 [platforms.<name>]
 domains = ["domain.com", "www.domain.com"]
-tracking_params = ["si", "igshid"]
+tracking_params = ["si", "is"]
 tracking_prefixes = []
 normalize_host = "x.com"
 ```
 
-### 4.2 Planned redesign
-
-Under discussion: replacing the current deny-list approach with an allow-list model:
-
-```toml
-[general]
-force_https = true
-keep_params = []                     # global allow-list (currently empty = deny-all)
-
-[platforms.youtube]
-force_https = false
-domains = ["youtube.com", "youtu.be", ...]
-normalized_domain = "youtube.com"
-keep_params = ["v", "t"]             # allow-list: drop everything else
-redirect_params = ["redirect"]       # path or query param indicating redirect
-redirect_services = []               # shortener domains requiring HTTP resolution
-
-[platforms.x]
-domains = ["x.com", "twitter.com"]
-normalized_domain = "x.com"
-redirect_services = ["t.co"]
-```
-
-Key design considerations:
-- `keep_params` is an allow-list — anything not in it is removed
-- `redirect_params` identifies redirect wrappers (e.g. path `/redirect` with param `q`)
-- `redirect_services` lists shortener domains that need HTTP resolution
-- Per-platform settings override their global counterpart
-- Redirect unwrapping happens *before* param filtering so `q` isn't lost
-
 ## 5. Implementation details
 
-### 5.1 YouTube redirect unwrapping
+### 5.1 Redirect unwrapping
 
 Located in `clean_url()` as an early return:
 
@@ -166,6 +134,7 @@ find_platform(host, config) -> Option<(&str, &PlatformConfig)>
 
 | Format | Output |
 |--------|--------|
+| `youtube.com/watch?v=ID&list=PL…&index=2&t=123` | `youtu.be/ID?list=PL…&index=2&t=123` |
 | `youtube.com/watch?v=ID&t=123` | `youtu.be/ID?t=123` |
 | `youtu.be/ID` | `youtu.be/ID` (pass through) |
 | `youtube.com/shorts/ID` | `youtu.be/ID` |
@@ -175,7 +144,7 @@ find_platform(host, config) -> Option<(&str, &PlatformConfig)>
 | `m.youtube.com/redirect?q=URL` | `clean(URL)` |
 | `youtube-nocookie.com/*` | Same as youtube.com/* |
 
-Share tokens `si` and `is` are removed. On a video link the rewrite drops them with every other parameter except a timestamp. On other YouTube pages, such as a channel or a playlist, they are removed as tracking parameters and the rest of the URL stays.
+Share tokens `si` and `is` are removed. On a video link the rewrite also keeps `list` and `index` when the video belongs to a playlist. On other YouTube pages, such as a channel or a playlist page, those tokens are removed as tracking parameters and the rest of the URL stays.
 
 ### 6.2 X (Twitter)
 
@@ -216,17 +185,8 @@ Return codes:
 
 1. **Clipboard-first workflow** — no args reads clipboard, no `--copy` flag needed because clipboard is the primary input channel
 2. **Hardcoded fallbacks** — YouTube rewriting and shortener resolution work even without a config file, so the tool is useful out of the box
-3. **YouTube is recognized by host** — `youtube.com`, `youtu.be`, `music.youtube.com`, and `youtube-nocookie.com` are rewritten in code. The YouTube config block lists the share tokens `si` and `is` so they are also removed from pages that are not a single video
+3. **YouTube is recognized by host** — `youtube.com`, `youtu.be`, `music.youtube.com`, and `youtube-nocookie.com` are rewritten in code. A video link keeps its timestamp and, when it belongs to a playlist, `list` and `index`. The YouTube config block lists the share tokens `si` and `is` so they are also removed from pages that are not a single video
 4. **Structural detection** — redirect unwrapping detects `/redirect`, `/url`, or `/l.php` plus an http(s) destination, not a platform match
 5. **No external network in the main path** — only shortener resolution uses the network. It times out after 10 seconds and keeps the original link if the lookup fails
 
-## 9. Future items
-
-See also "Future Considerations" in this section and the evolving config design (section 4.2).
-
-- [ ] Config allow-list (`keep_params`) replacing deny-list
-- [ ] `redirect_params` / `redirect_services` config fields
-- [ ] Per-platform `force_https` override
-- [ ] Support for additional platforms (TikTok, Reddit, LinkedIn, Threads, Bluesky)
-- [ ] Multiple URL processing
-- [ ] JSON output mode
+Built with [Allan Jorch](https://github.com/allanjorch), [Claude Code](https://claude.ai) (opencode), and [Grok](https://x.ai).

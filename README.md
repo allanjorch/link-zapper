@@ -61,7 +61,7 @@ Works fine without either — pass a URL as an argument and read stdout.
    - `youtube.com/shorts/ID`
    - `youtube.com/embed/ID`
    - `music.youtube.com/watch?v=ID`
-   - Preserves timestamp (`t=` / `start=`)
+   - Preserves a timestamp (`t=` / `start=`) and, when the video is in a playlist, `list` and `index`
 
 4. **General tracking removal** — parameters removed from every URL:
    - `utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`
@@ -91,7 +91,7 @@ domains = ["tiktok.com", "www.tiktok.com", "m.tiktok.com"]
 tracking_params = ["_t"]
 ```
 
-YouTube video links are rewritten in code for `youtube.com`, `youtu.be`, `music.youtube.com`, and `youtube-nocookie.com`. That rewrite drops every parameter except a timestamp, including the share tokens `si` and `is`. The `[platforms.youtube]` block lists those same tokens so they are also removed from pages that are not a single video, such as a channel or a playlist.
+YouTube video links are rewritten in code for `youtube.com`, `youtu.be`, `music.youtube.com`, and `youtube-nocookie.com`. That rewrite keeps a timestamp and playlist position (`list`, `index`), and drops every other parameter, including the share tokens `si` and `is`. The `[platforms.youtube]` block lists those same tokens so they are also removed from pages that are not a single video, such as a channel or a playlist.
 
 ## Adding a platform
 
@@ -112,4 +112,4 @@ MIT
 
 ---
 
-Built with [Allan Jorch](https://github.com/allanjorch) and [Claude Code](https://claude.ai) (opencode).
+Built with [Allan Jorch](https://github.com/allanjorch), [Claude Code](https://claude.ai) (opencode), and [Grok](https://x.ai).

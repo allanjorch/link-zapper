@@ -197,10 +197,7 @@ fn clean_youtube(url: &Url, config: &Config, pconfig: Option<&config::PlatformCo
         let path = url.path().trim_start_matches('/');
         let id = path.split(&['/', '?', '#'][..]).next().unwrap_or(path);
         if is_valid_video_id(id) {
-            if let Some(ts) = extract_timestamp(url) {
-                return format!("https://youtu.be/{id}?t={ts}");
-            }
-            return format!("https://youtu.be/{id}");
+            return youtube_video_url(id, url);
         }
     }
 
@@ -208,10 +205,7 @@ fn clean_youtube(url: &Url, config: &Config, pconfig: Option<&config::PlatformCo
     if let Some(v) = url.query_pairs().find(|(k, _)| k == "v") {
         let id = v.1.to_string();
         if is_valid_video_id(&id) {
-            if let Some(ts) = extract_timestamp(url) {
-                return format!("https://youtu.be/{id}?t={ts}");
-            }
-            return format!("https://youtu.be/{id}");
+            return youtube_video_url(&id, url);
         }
     }
 
@@ -223,10 +217,7 @@ fn clean_youtube(url: &Url, config: &Config, pconfig: Option<&config::PlatformCo
             .next()
             .unwrap_or(stripped);
         if is_valid_video_id(id) {
-            if let Some(ts) = extract_timestamp(url) {
-                return format!("https://youtu.be/{id}?t={ts}");
-            }
-            return format!("https://youtu.be/{id}");
+            return youtube_video_url(id, url);
         }
     }
 
@@ -237,10 +228,7 @@ fn clean_youtube(url: &Url, config: &Config, pconfig: Option<&config::PlatformCo
             .next()
             .unwrap_or(stripped);
         if is_valid_video_id(id) {
-            if let Some(ts) = extract_timestamp(url) {
-                return format!("https://youtu.be/{id}?t={ts}");
-            }
-            return format!("https://youtu.be/{id}");
+            return youtube_video_url(id, url);
         }
     }
 
@@ -259,6 +247,61 @@ fn clean_youtube(url: &Url, config: &Config, pconfig: Option<&config::PlatformCo
     remove_tracking_params(&mut u, &share_tokens, &[]);
     remove_fragment(&mut u);
     u.to_string()
+}
+
+/// Short video link. Keeps a playlist (`list`, and `index` when a playlist is
+/// present) and a timestamp. Drops share tokens and every other parameter.
+fn youtube_video_url(id: &str, source: &Url) -> String {
+    let mut out = Url::parse(&format!("https://youtu.be/{id}")).expect("youtu.be base");
+    let list = playlist_id(source);
+    let index = list.as_ref().and_then(|_| playlist_index(source));
+    let timestamp = extract_timestamp(source);
+    if list.is_none() && timestamp.is_none() {
+        return out.to_string();
+    }
+    {
+        let mut query = out.query_pairs_mut();
+        if let Some(list) = &list {
+            query.append_pair("list", list);
+        }
+        if let Some(index) = &index {
+            query.append_pair("index", index);
+        }
+        if let Some(timestamp) = &timestamp {
+            query.append_pair("t", timestamp);
+        }
+    }
+    out.to_string()
+}
+
+fn playlist_id(url: &Url) -> Option<String> {
+    let value = url
+        .query_pairs()
+        .find(|(key, _)| key == "list")
+        .map(|(_, value)| value.into_owned())?;
+    let value = value.trim();
+    if (2..=80).contains(&value.len())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        Some(value.to_string())
+    } else {
+        None
+    }
+}
+
+fn playlist_index(url: &Url) -> Option<String> {
+    let value = url
+        .query_pairs()
+        .find(|(key, _)| key == "index")
+        .map(|(_, value)| value.into_owned())?;
+    let position: u32 = value.trim().parse().ok()?;
+    if position >= 1 {
+        Some(position.to_string())
+    } else {
+        None
+    }
 }
 
 fn is_youtube_host(host: Option<&str>) -> bool {
@@ -542,6 +585,24 @@ mod tests {
         assert_eq!(
             clean("https://www.youtube.com/watch?v=dQw4w9WgXcQ&start=60"),
             "https://youtu.be/dQw4w9WgXcQ?t=60"
+        );
+    }
+
+    #[test]
+    fn test_youtube_keeps_playlist_and_timestamp() {
+        assert_eq!(
+            clean(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf&index=2&t=43s&si=abc"
+            ),
+            "https://youtu.be/dQw4w9WgXcQ?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf&index=2&t=43s"
+        );
+        assert_eq!(
+            clean("https://youtu.be/dQw4w9WgXcQ?si=abc&list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"),
+            "https://youtu.be/dQw4w9WgXcQ?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"
+        );
+        assert_eq!(
+            clean("https://www.youtube.com/watch?v=dQw4w9WgXcQ&index=2&feature=share"),
+            "https://youtu.be/dQw4w9WgXcQ"
         );
     }
 

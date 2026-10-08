@@ -28,8 +28,6 @@ pub struct PlatformConfig {
     pub tracking_prefixes: Vec<String>,
     #[serde(default)]
     pub normalize_host: Option<String>,
-    #[serde(default)]
-    pub cleaner: Option<String>,
 }
 
 impl Config {
@@ -89,11 +87,9 @@ domains = [
     \"youtube-nocookie.com\",
     \"www.youtube-nocookie.com\",
 ]
-# Removed only on YouTube URLs
-tracking_params = [\"si\"]
-# Built-in cleaners: /redirect unwrapping and video URL reconstruction
-# (youtube.com/watch?v=ID → youtu.be/ID)
-cleaner = \"youtube\"
+# Share tokens. YouTube uses `si` or `is`. Removed on pages that are not a
+# single video. Video links are rewritten to youtu.be in code.
+tracking_params = [\"si\", \"is\"]
 
 [platforms.x]
 domains = [
@@ -104,7 +100,8 @@ domains = [
     \"www.twitter.com\",
     \"m.twitter.com\",
 ]
-tracking_params = [\"s\"]
+# `s` is the share source. `t` is the share token, not a timestamp.
+tracking_params = [\"s\", \"t\"]
 normalize_host = \"x.com\"
 # Built-in: t.co short URLs are automatically resolved via HTTP redirect
 # and the destination URL is then cleaned through the full pipeline
@@ -163,10 +160,9 @@ impl Default for Config {
                             "youtube-nocookie.com".into(),
                             "www.youtube-nocookie.com".into(),
                         ],
-                        tracking_params: vec!["si".into()],
+                        tracking_params: vec!["si".into(), "is".into()],
                         tracking_prefixes: vec![],
                         normalize_host: None,
-                        cleaner: Some("youtube".into()),
                     },
                 );
 
@@ -181,10 +177,9 @@ impl Default for Config {
                             "www.twitter.com".into(),
                             "m.twitter.com".into(),
                         ],
-                        tracking_params: vec!["s".into()],
+                        tracking_params: vec!["s".into(), "t".into()],
                         tracking_prefixes: vec![],
                         normalize_host: Some("x.com".into()),
-                        cleaner: None,
                     },
                 );
 
@@ -199,7 +194,6 @@ impl Default for Config {
                         tracking_params: vec!["igshid".into(), "igsh".into()],
                         tracking_prefixes: vec![],
                         normalize_host: None,
-                        cleaner: None,
                     },
                 );
 
@@ -216,7 +210,6 @@ impl Default for Config {
                         tracking_params: vec!["mibextid".into(), "__tn__".into()],
                         tracking_prefixes: vec![],
                         normalize_host: None,
-                        cleaner: None,
                     },
                 );
 
@@ -248,5 +241,3 @@ pub fn find_platform<'a>(host: &str, config: &'a Config) -> Option<(&'a str, &'a
     }
     None
 }
-
-

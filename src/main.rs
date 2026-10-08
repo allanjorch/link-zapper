@@ -1,7 +1,7 @@
+use reqwest::blocking::Client;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use url::Url;
-use reqwest::blocking::Client;
 
 mod config;
 use config::Config;
@@ -99,9 +99,7 @@ fn read_clipboard() -> Option<String> {
 }
 
 fn write_clipboard(text: &str) {
-    if let Ok(mut child) = Command::new("wl-copy")
-        .stdin(Stdio::piped())
-        .spawn()
+    if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).spawn()
         && let Some(mut stdin) = child.stdin.take()
     {
         let _ = stdin.write_all(text.as_bytes());
@@ -120,6 +118,12 @@ fn write_clipboard(text: &str) {
 }
 
 fn clean_url(input: &str, config: &Config) -> String {
+    clean_url_at(input, config, 0)
+}
+
+const MAX_UNWRAP_DEPTH: u8 = 5;
+
+fn clean_url_at(input: &str, config: &Config, depth: u8) -> String {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -143,30 +147,22 @@ fn clean_url(input: &str, config: &Config) -> String {
     let host = url.host_str().unwrap_or("").to_lowercase();
     let platform = config::find_platform(&host, config);
 
-    // YouTube redirect — extract the real destination from the `q` param
-    if is_youtube_platform(platform, url.host_str())
-        && url.path() == "/redirect"
-        && let Some(dest) = url
-            .query_pairs()
-            .find(|(k, _)| k == "q")
-            .map(|(_, v)| v.to_string())
-        && !dest.is_empty()
-    {
-        return clean_url(&dest, config);
+    if depth < MAX_UNWRAP_DEPTH {
+        // Redirect wrappers (YouTube /redirect?q=, Google /url?q=, Facebook /l.php?u=).
+        if let Some(dest) = redirect_target(&url) {
+            return clean_url_at(&dest, config, depth + 1);
+        }
+        // Share shorteners (t.co, facebook.com/share/…, vm.tiktok.com, bit.ly, …).
+        if is_shortener(&host, url.path())
+            && let Some(resolved) = resolve_redirect(url.as_str())
+        {
+            return clean_url_at(&resolved, config, depth + 1);
+        }
     }
 
-    // Resolve t.co shortened URLs via HTTP redirect
-    if host == "t.co"
-        && let Some(resolved) = resolve_redirect(url.as_ref())
-    {
-        return clean_url(&resolved, config);
-    }
-
-    // YouTube uses a built-in URL reconstructor
-    if is_youtube_platform(platform, url.host_str())
-        && let Some((_, pconfig)) = &platform
-    {
-        return clean_youtube(&url, config, pconfig);
+    // YouTube canonical form. Recognized by host, not by config.
+    if is_youtube_host(url.host_str()) {
+        return clean_youtube(&url, config, platform.map(|(_, p)| p));
     }
 
     // General tracking removal (applies to ALL URLs)
@@ -193,7 +189,7 @@ fn clean_url(input: &str, config: &Config) -> String {
     url.to_string()
 }
 
-fn clean_youtube(url: &Url, config: &Config, pconfig: &config::PlatformConfig) -> String {
+fn clean_youtube(url: &Url, config: &Config, pconfig: Option<&config::PlatformConfig>) -> String {
     let host = url.host_str().unwrap_or("").to_lowercase();
 
     // youtu.be/VIDEO_ID
@@ -222,7 +218,10 @@ fn clean_youtube(url: &Url, config: &Config, pconfig: &config::PlatformConfig) -
     // youtube.com/shorts/ID
     let path = url.path();
     if let Some(stripped) = path.strip_prefix("/shorts/") {
-        let id = stripped.split(&['/', '?', '#'][..]).next().unwrap_or(stripped);
+        let id = stripped
+            .split(&['/', '?', '#'][..])
+            .next()
+            .unwrap_or(stripped);
         if is_valid_video_id(id) {
             if let Some(ts) = extract_timestamp(url) {
                 return format!("https://youtu.be/{id}?t={ts}");
@@ -233,7 +232,10 @@ fn clean_youtube(url: &Url, config: &Config, pconfig: &config::PlatformConfig) -
 
     // youtube.com/embed/ID
     if let Some(stripped) = path.strip_prefix("/embed/") {
-        let id = stripped.split(&['/', '?', '#'][..]).next().unwrap_or(stripped);
+        let id = stripped
+            .split(&['/', '?', '#'][..])
+            .next()
+            .unwrap_or(stripped);
         if is_valid_video_id(id) {
             if let Some(ts) = extract_timestamp(url) {
                 return format!("https://youtu.be/{id}?t={ts}");
@@ -249,20 +251,23 @@ fn clean_youtube(url: &Url, config: &Config, pconfig: &config::PlatformConfig) -
         &config.general.tracking_params,
         &config.general.tracking_prefixes,
     );
-    remove_tracking_params(
-        &mut u,
-        &pconfig.tracking_params,
-        &pconfig.tracking_prefixes,
-    );
+    if let Some(pconfig) = pconfig {
+        remove_tracking_params(&mut u, &pconfig.tracking_params, &pconfig.tracking_prefixes);
+    }
+    // Share button tokens. Drop them even when the config file forgot them.
+    let share_tokens = vec!["si".to_string(), "is".to_string()];
+    remove_tracking_params(&mut u, &share_tokens, &[]);
     remove_fragment(&mut u);
     u.to_string()
 }
 
 fn is_youtube_host(host: Option<&str>) -> bool {
+    let Some(host) = host else {
+        return false;
+    };
     matches!(
-        host,
-        Some(
-            "youtube.com"
+        host.to_ascii_lowercase().as_str(),
+        "youtube.com"
             | "www.youtube.com"
             | "m.youtube.com"
             | "youtu.be"
@@ -271,41 +276,133 @@ fn is_youtube_host(host: Option<&str>) -> bool {
             | "www.music.youtube.com"
             | "youtube-nocookie.com"
             | "www.youtube-nocookie.com"
-        )
     )
 }
 
-fn is_youtube_platform(platform: Option<(&str, &config::PlatformConfig)>, host: Option<&str>) -> bool {
-    // Config takes precedence
-    if let Some((_, p)) = platform
-        && p.cleaner.as_deref() == Some("youtube")
-    {
+fn query_param(url: &Url, key: &str) -> Option<String> {
+    url.query_pairs()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.into_owned())
+        .filter(|v| !v.is_empty())
+}
+
+fn redirect_target(url: &Url) -> Option<String> {
+    let path = url.path();
+    if path != "/redirect" && path != "/url" && path != "/l.php" {
+        return None;
+    }
+    for key in ["q", "u", "url"] {
+        let Some(dest) = query_param(url, key) else {
+            continue;
+        };
+        if let Ok(parsed) = Url::parse(&dest)
+            && (parsed.scheme() == "http" || parsed.scheme() == "https")
+        {
+            return Some(dest);
+        }
+    }
+    None
+}
+
+fn bare_host(host: &str) -> &str {
+    host.strip_prefix("www.").unwrap_or(host)
+}
+
+fn is_shortener(host: &str, path: &str) -> bool {
+    let host = bare_host(host);
+    const HOSTS: &[&str] = &[
+        "t.co",
+        "vm.tiktok.com",
+        "vt.tiktok.com",
+        "fb.me",
+        "fb.watch",
+        "lnkd.in",
+        "redd.it",
+        "pin.it",
+        "bit.ly",
+        "tinyurl.com",
+        "ow.ly",
+        "buff.ly",
+        "cutt.ly",
+        "is.gd",
+        "goo.gl",
+        "rebrand.ly",
+        "amzn.to",
+        "a.co",
+        "spoti.fi",
+        "spotify.link",
+    ];
+    if HOSTS.contains(&host) {
         return true;
     }
-    // Fall back to hardcoded host check
-    is_youtube_host(host)
+    if matches!(host, "facebook.com" | "m.facebook.com" | "fb.com") && path.starts_with("/share/") {
+        return true;
+    }
+    host == "tiktok.com" && path.starts_with("/t/")
 }
 
 fn resolve_redirect(url_str: &str) -> Option<String> {
+    // t.co redirects a plain client and refuses a browser UA. Some other
+    // shorteners do the opposite, so try the plain client first.
+    if let Some(url) = resolve_with_ua(url_str, "link-zapper/0.1") {
+        return Some(url);
+    }
+    resolve_with_ua(
+        url_str,
+        "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    )
+}
+
+fn resolve_with_ua(url_str: &str, user_agent: &str) -> Option<String> {
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(std::time::Duration::from_secs(10))
+        .user_agent(user_agent)
         .build()
         .ok()?;
+    final_url_after(&client, url_str)
+}
 
-    let resp = client.head(url_str).send().ok()?;
-    let final_url = resp.url().to_string();
-
-    if final_url == url_str {
-        let resp = client.get(url_str).send().ok()?;
+fn final_url_after(client: &Client, url_str: &str) -> Option<String> {
+    if let Ok(resp) = client.head(url_str).send() {
         let final_url = resp.url().to_string();
-        if final_url == url_str {
-            return None;
+        if !same_url(&final_url, url_str) && !is_interstitial(&final_url) {
+            return Some(final_url);
         }
-        return Some(final_url);
     }
+    let resp = client.get(url_str).send().ok()?;
+    let final_url = resp.url().to_string();
+    if same_url(&final_url, url_str) || is_interstitial(&final_url) {
+        None
+    } else {
+        Some(final_url)
+    }
+}
 
-    Some(final_url)
+fn same_url(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (Url::parse(a), Url::parse(b)) {
+        (Ok(left), Ok(right)) => {
+            left.scheme() == right.scheme()
+                && left.host_str() == right.host_str()
+                && left.path().trim_end_matches('/') == right.path().trim_end_matches('/')
+                && left.query() == right.query()
+        }
+        _ => false,
+    }
+}
+
+fn is_interstitial(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return true;
+    };
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return true;
+    }
+    let path = parsed.path().to_ascii_lowercase();
+    path.starts_with("/login") || path.starts_with("/checkpoint") || path.contains("login.php")
 }
 
 fn extract_timestamp(url: &Url) -> Option<String> {
@@ -321,14 +418,14 @@ fn extract_timestamp(url: &Url) -> Option<String> {
 }
 
 fn is_valid_video_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 11 && id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    !id.is_empty()
+        && id.len() <= 11
+        && id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
 }
 
-fn remove_tracking_params(
-    url: &mut Url,
-    tracking_params: &[String],
-    tracking_prefixes: &[String],
-) {
+fn remove_tracking_params(url: &mut Url, tracking_params: &[String], tracking_prefixes: &[String]) {
     if tracking_params.is_empty() && tracking_prefixes.is_empty() {
         return;
     }
@@ -360,8 +457,7 @@ fn remove_tracking_params(
 
 fn is_tracking_param(key: &str, tracking_params: &[String], tracking_prefixes: &[String]) -> bool {
     let lower = key.to_lowercase();
-    tracking_params.contains(&lower)
-        || tracking_prefixes.iter().any(|p| lower.starts_with(p))
+    tracking_params.contains(&lower) || tracking_prefixes.iter().any(|p| lower.starts_with(p))
 }
 
 fn remove_fragment(url: &mut Url) {
@@ -450,8 +546,26 @@ mod tests {
     }
 
     #[test]
+    fn test_youtube_strips_is_share_token() {
+        assert_eq!(
+            clean("https://youtu.be/dQw4w9WgXcQ?is=abc123"),
+            "https://youtu.be/dQw4w9WgXcQ"
+        );
+        assert_eq!(
+            clean("https://www.youtube.com/playlist?list=PLabc123&is=xyz"),
+            "https://www.youtube.com/playlist?list=PLabc123"
+        );
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(
+            clean_url("https://www.youtube.com/@channel?is=abc123", &config),
+            "https://www.youtube.com/@channel"
+        );
+    }
+
+    #[test]
     fn test_youtube_strips_tracking() {
-        let result = clean("https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=abc123&utm_source=twitter");
+        let result =
+            clean("https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=abc123&utm_source=twitter");
         assert_eq!(result, "https://youtu.be/dQw4w9WgXcQ");
     }
 
@@ -545,10 +659,7 @@ mod tests {
 
     #[test]
     fn test_http_upgrade() {
-        assert_eq!(
-            clean("http://example.com/page"),
-            "https://example.com/page"
-        );
+        assert_eq!(clean("http://example.com/page"), "https://example.com/page");
     }
 
     #[test]
@@ -621,7 +732,9 @@ mod tests {
     #[test]
     fn test_youtube_redirect_extracts_destination() {
         assert_eq!(
-            clean("https://www.youtube.com/redirect?event=video_description&redir_token=TOKEN&q=https%3A%2F%2Fexample.com%2Fpage&v=rAzT5lcezPs"),
+            clean(
+                "https://www.youtube.com/redirect?event=video_description&redir_token=TOKEN&q=https%3A%2F%2Fexample.com%2Fpage&v=rAzT5lcezPs"
+            ),
             "https://example.com/page"
         );
     }
@@ -629,7 +742,9 @@ mod tests {
     #[test]
     fn test_youtube_redirect_mobile() {
         assert_eq!(
-            clean("https://m.youtube.com/redirect?event=video_description&q=https%3A%2F%2Fexample.com%2Fpage&v=rAzT5lcezPs"),
+            clean(
+                "https://m.youtube.com/redirect?event=video_description&q=https%3A%2F%2Fexample.com%2Fpage&v=rAzT5lcezPs"
+            ),
             "https://example.com/page"
         );
     }
@@ -653,8 +768,100 @@ mod tests {
     #[test]
     fn test_youtube_redirect_cleans_destination_tracking() {
         assert_eq!(
-            clean("https://www.youtube.com/redirect?event=video_description&q=https%3A%2F%2Fexample.com%2Fpage%3Futm_source%3Dtwitter%26foo%3Dbar&v=rAzT5lcezPs"),
+            clean(
+                "https://www.youtube.com/redirect?event=video_description&q=https%3A%2F%2Fexample.com%2Fpage%3Futm_source%3Dtwitter%26foo%3Dbar&v=rAzT5lcezPs"
+            ),
             "https://example.com/page?foo=bar"
         );
+    }
+
+    #[test]
+    fn test_youtube_rewrite_ignores_platform_block() {
+        let raw = r#"
+            [general]
+            tracking_params = ["utm_source", "fbclid"]
+            tracking_prefixes = ["utm_"]
+
+            [platforms.youtube]
+            domains = ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"]
+            tracking_params = ["si"]
+        "#;
+        let config: Config = toml::from_str(raw).unwrap();
+        assert_eq!(
+            clean_url(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=abc123",
+                &config
+            ),
+            "https://youtu.be/dQw4w9WgXcQ"
+        );
+        assert_eq!(
+            clean_url(
+                "https://m.youtube.com/redirect?q=https%3A%2F%2Fexample.com%2Fpage%3Futm_source%3Dtwitter%26foo%3Dbar",
+                &config
+            ),
+            "https://example.com/page?foo=bar"
+        );
+    }
+
+    #[test]
+    fn test_youtube_with_empty_config() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(
+            clean_url(
+                "https://www.youtube.com/shorts/dQw4w9WgXcQ?si=abc123",
+                &config
+            ),
+            "https://youtu.be/dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn test_google_url_wrapper() {
+        assert_eq!(
+            clean(
+                "https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fpage%3Futm_source%3Dgoogle%26foo%3Dbar&sa=D"
+            ),
+            "https://example.com/page?foo=bar"
+        );
+    }
+
+    #[test]
+    fn test_facebook_link_shim() {
+        assert_eq!(
+            clean(
+                "https://l.facebook.com/l.php?u=https%3A%2F%2Fexample.com%2Fpage%3Ffbclid%3Dabc%26foo%3Dbar"
+            ),
+            "https://example.com/page?foo=bar"
+        );
+    }
+
+    #[test]
+    fn test_redirect_ignores_non_url_q() {
+        assert_eq!(
+            clean("https://example.com/redirect?q=hello&utm_source=x"),
+            "https://example.com/redirect?q=hello"
+        );
+    }
+
+    #[test]
+    fn test_x_strips_share_token() {
+        assert_eq!(
+            clean("https://twitter.com/user/status/123456789?s=20&t=AbCdEfGh"),
+            "https://x.com/user/status/123456789"
+        );
+    }
+
+    #[test]
+    fn test_shortener_detection() {
+        assert!(is_shortener("t.co", "/S16ync3MBq"));
+        assert!(is_shortener("www.bit.ly", "/abc"));
+        assert!(is_shortener("facebook.com", "/share/p/abc"));
+        assert!(is_shortener("www.facebook.com", "/share/r/abc"));
+        assert!(is_shortener("vm.tiktok.com", "/ZMabc"));
+        assert!(is_shortener("www.tiktok.com", "/t/ZMabc"));
+        assert!(!is_shortener("facebook.com", "/user/posts/12345"));
+        assert!(!is_shortener("youtu.be", "/dQw4w9WgXcQ"));
+        assert!(!is_shortener("example.com", "/page"));
+        assert!(!is_shortener("tiktok.com", "/@user/video/1"));
     }
 }

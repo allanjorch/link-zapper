@@ -54,9 +54,9 @@ Works fine without either — pass a URL as an argument and read stdout.
 
 ### Zap phases (in order)
 
-1. **Redirect unwrapping** — any URL with path `/redirect` and a `q` parameter is unwrapped to reveal the real destination URL, then re-cleaned. Automatic for all URLs, no config needed.
+1. **Redirect unwrapping** — a URL whose path is `/redirect`, `/url`, or `/l.php` and whose `q`, `u`, or `url` parameter is an http(s) link is unwrapped, then cleaned again. This runs for every host. No config needed.
 
-2. **t.co resolution** — `t.co` shortened URLs are resolved via HTTP redirect. The destination URL is then cleaned through the full pipeline. Requires network access; falls back gracefully.
+2. **Shortener resolution** — known shorteners (`t.co`, `bit.ly`, `vm.tiktok.com`, `lnkd.in`, `facebook.com/share/…`, and others) are followed over HTTP. The destination is then cleaned. Requires network access; if the lookup fails, or lands on a login page, the original link is kept and still stripped of tracking.
 
 3. **YouTube URL reconstruction** — converts to `youtu.be/ID`:
    - `youtube.com/watch?v=ID`
@@ -93,7 +93,7 @@ domains = ["tiktok.com", "www.tiktok.com", "m.tiktok.com"]
 tracking_params = ["_t"]
 ```
 
-For YouTube, the config also includes `cleaner = "youtube"` to activate built-in redirect unwrapping and video URL reconstruction for all domains in that section. No rebuild needed — add a new domain and it works immediately.
+YouTube video links are rewritten in code for `youtube.com`, `youtu.be`, `music.youtube.com`, and `youtube-nocookie.com`. That rewrite drops every parameter except a timestamp, including the share tokens `si` and `is`. The `[platforms.youtube]` block lists those same tokens so they are also removed from pages that are not a single video, such as a channel or a playlist.
 
 ## Adding a platform
 
@@ -106,7 +106,7 @@ tracking_params = ["utm_source", "share_id"]
 normalize_host = "reddit.com"
 ```
 
-If the platform needs custom URL reconstruction (like YouTube), set `cleaner = "youtube"` in its section — or open an issue for a new built-in handler.
+YouTube's `youtu.be` form is built in. A platform that needs its own URL shape needs a change in the program.
 
 ## License
 

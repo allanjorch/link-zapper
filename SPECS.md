@@ -20,18 +20,19 @@
 Input URL
   │
   ├─ 1. Redirect unwrapping (structural detection)
-  │     path == "/redirect" && has param "q"
-  │     → extract `q`, recursively clean the extracted URL
+  │     path is /redirect, /url, or /l.php, on any host
+  │     → extract q, u, or url when the value is an http(s) URL
+  │     → recursively clean the extracted URL
   │     → works for any platform, no config needed
   │
-  ├─ 2. t.co resolution (HTTP redirect follow)
-  │     host == "t.co"
+  ├─ 2. Shortener resolution (HTTP redirect follow)
+  │     known shortener host, or a share path such as facebook.com/share/
   │     → follow redirect chain via reqwest blocking client
   │     → recursively clean the resolved URL
-  │     → fallback: return original if network unavailable
+  │     → fallback: return original if network unavailable or the result is a login page
   │
   ├─ 3. YouTube URL reconstruction
-  │     Gate: config has cleaner = "youtube" OR host in is_youtube_host()
+  │     Gate: host in is_youtube_host()
   │     → watch?v=ID → youtu.be/ID
   │     → shorts/ID  → youtu.be/ID
   │     → embed/ID   → youtu.be/ID
@@ -57,8 +58,8 @@ Input URL
 
 | Feature | Detection | Implementation |
 |---------|-----------|---------------|
-| Redirect unwrapping | `path == "/redirect"` + has `q` param | `clean_url()` early return |
-| t.co resolution | `host == "t.co"` | `resolve_redirect()` HTTP client |
+| Redirect unwrapping | path `/redirect`, `/url`, or `/l.php` plus an http(s) `q`, `u`, or `url` | `clean_url()` early return |
+| Shortener resolution | known shortener host, or a share path such as `/share/` | `resolve_redirect()` HTTP client |
 | YouTube video reconstruction | host in `is_youtube_host()` | `clean_youtube()` URL builder |
 
 ### 3.3 Config-driven behavior (extensible)
@@ -68,7 +69,6 @@ Input URL
 | Tracking param removal | `tracking_params` / `tracking_prefixes` (general + per-platform) |
 | Host normalization | `normalize_host` per-platform |
 | Platform domain matching | `domains` per-platform |
-| Cleaner activation | `cleaner = "youtube"` (with hardcoded `is_youtube_host()` fallback) |
 
 ## 4. Config design
 
@@ -84,7 +84,6 @@ domains = ["domain.com", "www.domain.com"]
 tracking_params = ["si", "igshid"]
 tracking_prefixes = []
 normalize_host = "x.com"
-cleaner = "youtube"        # optional, activates built-in handler
 ```
 
 ### 4.2 Planned redesign
@@ -124,14 +123,14 @@ Key design considerations:
 Located in `clean_url()` as an early return:
 
 ```
-Detect: host in is_youtube_host() && path == "/redirect"
-Extract: query param "q" (URL-decoded by the url crate)
+Detect: path is /redirect, /url, or /l.php, on any host
+Extract: query param q, u, or url, when the value is an http(s) URL
 Action: return clean_url(extracted_url, config)
 ```
 
 The url crate's `query_pairs()` automatically percent-decodes values, so `q=https%3A%2F%2Fexample.com` yields `"https://example.com"`.
 
-### 5.2 t.co resolution
+### 5.2 Shortener resolution
 
 ```
 Client: reqwest::blocking::Client
@@ -176,10 +175,12 @@ find_platform(host, config) -> Option<(&str, &PlatformConfig)>
 | `m.youtube.com/redirect?q=URL` | `clean(URL)` |
 | `youtube-nocookie.com/*` | Same as youtube.com/* |
 
+Share tokens `si` and `is` are removed. On a video link the rewrite drops them with every other parameter except a timestamp. On other YouTube pages, such as a channel or a playlist, they are removed as tracking parameters and the rest of the URL stays.
+
 ### 6.2 X (Twitter)
 
 - Normalizes host to `x.com`
-- Removes `s=` tracking parameter
+- Removes the `s` and `t` tracking parameters. `t` on an X link is a share token, not a timestamp
 - Supports `x.com`, `twitter.com`, `m.x.com`, `m.twitter.com`
 
 ### 6.3 Instagram
@@ -214,10 +215,10 @@ Return codes:
 ## 8. Key design decisions
 
 1. **Clipboard-first workflow** — no args reads clipboard, no `--copy` flag needed because clipboard is the primary input channel
-2. **Hardcoded fallbacks** — YouTube redirect and t.co resolution work even without a config file, ensuring the tool is useful out of the box
-3. **Config-first, then fallback** — `cleaner = "youtube"` in config takes precedence; if absent, `is_youtube_host()` provides a safety net
-4. **Structural detection** — redirect unwrapping detects `/redirect` + `q` purely by URL structure, not by platform match
-5. **No external network in main path** — t.co resolution is the only network call; it's isolated and forgiving (10s timeout, graceful failure)
+2. **Hardcoded fallbacks** — YouTube rewriting and shortener resolution work even without a config file, so the tool is useful out of the box
+3. **YouTube is recognized by host** — `youtube.com`, `youtu.be`, `music.youtube.com`, and `youtube-nocookie.com` are rewritten in code. The YouTube config block lists the share tokens `si` and `is` so they are also removed from pages that are not a single video
+4. **Structural detection** — redirect unwrapping detects `/redirect`, `/url`, or `/l.php` plus an http(s) destination, not a platform match
+5. **No external network in the main path** — only shortener resolution uses the network. It times out after 10 seconds and keeps the original link if the lookup fails
 
 ## 9. Future items
 
